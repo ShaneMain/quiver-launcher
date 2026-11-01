@@ -68,6 +68,13 @@ namespace QuiverLauncher
                         await InitializeGameManager();
                         return await ListGames();
 
+                    case "--list-json":
+                        if (args.Length != 1)
+                            return PrintError("Usage: QuiverLauncher --list-json");
+                        await InitializeGameManager();
+                        Console.WriteLine(CliLibrary.Serialize(_gameManager!.Games));
+                        return 0;
+
                     case "-r":
                     case "--run":
                         ClearTerminal();
@@ -88,6 +95,13 @@ namespace QuiverLauncher
                         await PrintHeader();
                         await InitializeGameManager();
                         return await UpdateAllGames();
+
+                    case "--update-app":
+                        if (args.Length != 2 || string.IsNullOrWhiteSpace(args[1]))
+                            return PrintError("Usage: QuiverLauncher --update-app <id from --list-json>");
+                        await PrintHeader();
+                        await InitializeGameManager();
+                        return await UpdateGameById(args[1]);
 
                     case "--update-launcher":
                     case "--self-update":
@@ -236,7 +250,9 @@ namespace QuiverLauncher
             Console.WriteLine();
             PrintHelpItem("-h, --help", "Show this help screen");
             PrintHelpItem("-l, --list", "List all available games");
+            PrintHelpItem("--list-json", "List library IDs, icons, versions and status as JSON");
             PrintHelpItem("-u, --update", "Update all installed games");
+            PrintHelpItem("--update-app <id>", "Update one installed app by its exact library ID");
             PrintHelpItem("--update-launcher", "Update the launcher itself");
             PrintHelpItem("-d, --download <name>", "Download and install a game");
             PrintHelpItem("-r, --run <name>", "Run a game (auto-updates if needed)");
@@ -733,6 +749,21 @@ namespace QuiverLauncher
             }
 
             return await UpdateOrDownloadGame(game, isUpdate: false);
+        }
+
+        private async Task<int> UpdateGameById(string id)
+        {
+            if (_gameManager == null)
+                return PrintError("App library is not available.");
+            var game = CliLibrary.FindById(_gameManager.Games, id);
+            if (game.Status == GameStatus.Installed)
+            {
+                Console.WriteLine($"{game.Name} is already up to date ({CleanVersion(game.InstalledVersion)}).");
+                return 0;
+            }
+            if (game.Status != GameStatus.UpdateAvailable)
+                return PrintError($"{game.Name} is not an installed app with an available update.");
+            return await UpdateOrDownloadGame(game, isUpdate: true);
         }
 
         private async Task<int> UpdateAllGames()

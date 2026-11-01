@@ -119,6 +119,41 @@ operation completes; a successful update must not require a running GUI event lo
 If a release needs a download-file choice, select the intended build in Quiver
 or configure the app's release asset filter before using the CLI.
 
+For integrations, `QuiverLauncher --list-json` checks the library and writes a
+single JSON document to stdout, without the human-readable banner:
+
+```json
+{
+  "schema_version": 1,
+  "apps": [{
+    "id": "github:owner/repository:LibraryFolder",
+    "name": "Example game",
+    "repository": "owner/repository",
+    "icon_url": "https://example.com/icon.png",
+    "status": "update_available",
+    "installed_version": "v1.0",
+    "latest_version": "v1.1"
+  }]
+}
+```
+
+`apps` can be empty. Optional repository, icon, and version values are `null`
+when unavailable. Status is `installed`, `update_available`, `not_installed`, or
+`unavailable`. Version values are Quiver's original strings, not normalized
+semantic versions. A successful listing exits 0; failures exit nonzero and must
+not be treated as an empty library.
+
+Use `QuiverLauncher --update-app '<id>'` with the exact opaque `id` from the
+listing to update one installed entry. IDs distinguish equal display names and
+are matched case-insensitively, never by name, folder alone, or substring.
+Changing an entry's repository or library folder can change its ID; list again
+instead of constructing or caching IDs indefinitely. Unknown, ambiguous,
+not-installed, and unavailable entries fail without installing another app.
+An already-current installed entry succeeds without downloading. Duplicate
+native IDs also make the JSON listing fail rather than expose an unsafe target.
+Per-entry updates retain Quiver's normal release selection and installation
+behavior, including the asset-filter requirement above.
+
 ## Configuration
 
 ### Kiosk mode
