@@ -154,6 +154,58 @@ native IDs also make the JSON listing fail rather than expose an unsafe target.
 Per-entry updates retain Quiver's normal release selection and installation
 behavior, including the asset-filter requirement above.
 
+Integrations can review download files without starting an installation:
+
+```sh
+QuiverLauncher --downloads-json 'github:owner/repository:LibraryFolder'
+```
+
+The command writes one schema-v1 JSON document without a banner:
+
+```json
+{
+  "schema_version": 1,
+  "game_id": "github:owner/repository:LibraryFolder",
+  "release": "v1.1",
+  "platform": "Linux-X64",
+  "selected": "game-linux-x86_64.tar.gz",
+  "choices": [{
+    "name": "game-linux-x86_64.tar.gz",
+    "size": 0,
+    "uncertain": false,
+    "recommended": true
+  }],
+  "reason": null
+}
+```
+
+`choices` contains Quiver's eligible and uncertain files. `recommended` uses the
+same platform-matching rule as the desktop download picker; it is guidance, not
+approval of every file. A size of `0` means unavailable. A blocking `reason`
+explains why no installation can be offered; `release` and `selected` may be
+`null`.
+
+`selected` carries Quiver's existing saved-build/automatic choice when compatible
+with the installation format. Otherwise, a single eligible recommended file
+that preserves portable versus Flatpak format is preselected. Multiple matching
+recommended files remain unselected. Consumers must not choose the first file
+or infer a selection merely from `recommended: true`. Reading choices does not
+install files or change release pins, asset filters, or installed-build receipts.
+
+To install exactly the reviewed release and file, supply both explicit options:
+
+```sh
+QuiverLauncher --update-app 'github:owner/repository:LibraryFolder' \
+  --release 'v1.1' --asset 'game-linux-x86_64.tar.gz'
+```
+
+The CLI reloads the selected release and rejects stale tags, missing or duplicate
+filenames, ineligible files, and formats requiring an unsupported interactive
+installer before installation. It does not substitute a newer release or another
+file, or persist a new asset filter or release pin. Explicitly choosing another
+file for the same release can reinstall that build. Refresh the JSON inventory
+after completion to observe the installed version, including after failures.
+
 ## Configuration
 
 ### Kiosk mode

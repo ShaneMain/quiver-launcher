@@ -21,10 +21,19 @@ resolver with the existing release target and credentials. Missing cached releas
 details are not evidence that no eligible download exists.
 
 This preserves the player's pin, Quiver's verified release target, asset filters,
-and installed-build matching. Genuinely ambiguous downloads still require an
-explicit selection; the CLI does not silently choose between portable, Flatpak,
-or Windows builds. Older installations without an `installed-build.txt` receipt
-may need a release asset filter configured in Quiver before unattended updates.
+and installed-build matching. `--downloads-json <id>` exposes the native release,
+eligible/uncertain files, and desktop-equivalent recommendation flags without
+installing or changing those preferences. It carries forward a compatible native
+selection, or preselects a unique eligible recommended file that preserves the
+installation's portable versus Flatpak format. Genuine ambiguity stays unresolved;
+integrations must request a choice rather than select the first download.
+
+`--update-app <id> --release <tag> --asset <filename>` installs exactly that
+reviewed target through the existing installer. A stale selected release or an
+unavailable/ambiguous filename fails instead of silently changing the target.
+Plain headless update commands still use the existing saved-build/filter rules;
+the review API avoids requiring a persistent asset-filter change for a one-time
+download choice.
 
 ## Background work
 

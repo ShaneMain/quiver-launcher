@@ -168,7 +168,7 @@ public class DownloadSelectionFlowTests
         using var fixture = new Fixture();
         var cli = new CLIHandler(fixture.Manager);
         var method = typeof(CLIHandler).GetMethod("UpdateOrDownloadGame", BindingFlags.NonPublic | BindingFlags.Instance)!;
-        var operation = (Task<int>)method.Invoke(cli, [fixture.Game(), false])!;
+        var operation = (Task<int>)method.Invoke(cli, [fixture.Game(), false, null, null])!;
         (await operation.WaitAsync(TimeSpan.FromSeconds(5))).Should().Be(1);
         fixture.Handler.Downloads.Should().Be(0);
     }

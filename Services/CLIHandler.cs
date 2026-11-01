@@ -75,6 +75,9 @@ namespace QuiverLauncher
                         Console.WriteLine(CliLibrary.Serialize(_gameManager!.Games));
                         return 0;
 
+                    case "--downloads-json":
+                        return await DownloadsJsonCommand(args);
+
                     case "-r":
                     case "--run":
                         ClearTerminal();
@@ -97,9 +100,16 @@ namespace QuiverLauncher
                         return await UpdateAllGames();
 
                     case "--update-app":
-                        if (args.Length != 2 || string.IsNullOrWhiteSpace(args[1]))
-                            return PrintError("Usage: QuiverLauncher --update-app <id from --list-json>");
+                        if ((args.Length != 2 && args.Length != 6) || string.IsNullOrWhiteSpace(args[1]) ||
+                            args.Length == 6 && (args[2] != "--release" || args[4] != "--asset" ||
+                                string.IsNullOrWhiteSpace(args[3]) || string.IsNullOrWhiteSpace(args[5])))
+                            return PrintError("Usage: QuiverLauncher --update-app <id from --list-json> [--release <exact-tag> --asset <exact-filename>]");
                         await PrintHeader();
+                        if (args.Length == 6)
+                        {
+                            await InitializeExactIdLibrary();
+                            return await UpdateGameById(args[1], args[3], args[5]);
+                        }
                         await InitializeGameManager();
                         return await UpdateGameById(args[1]);
 
@@ -162,6 +172,92 @@ namespace QuiverLauncher
 
                 settings.ListScope = originalScope;
                 AppSettings.Save(settings);
+            }
+        }
+
+        private async Task InitializeExactIdLibrary()
+        {
+            if (_gameManager != null)
+                return;
+            _gameManager = new GameManager();
+            // Do not change the player's scope, filters or pins, or run status repair while preparing choices.
+            foreach (var game in await _gameManager.CatalogService.LoadLocalCatalogAsync(AppSettings.Load()))
+                _gameManager.Games.Add(game);
+        }
+
+        private async Task<GitHubRelease> ResolveDownloadRelease(GameInfo game, AppSettings settings)
+        {
+            if (game.IsManuallyManaged || string.IsNullOrWhiteSpace(game.Repository))
+                throw new InvalidOperationException("This app has no managed release downloads.");
+            using var revalidate = ReleaseRequestCoordinator.AllowCachedMetadata(TimeSpan.Zero);
+            var release = await game.CatalogReleaseAsync(LauncherSession.OperationCancellation)
+                ?? await CatalogReleaseSelection.FetchSelectedAsync(
+                    _gameManager!.HttpClient, game.RepositorySource, game.Repository,
+                    game.ReleaseTarget, game.GetReleaseApiToken(settings), LauncherSession.OperationCancellation);
+            if (release == null || string.IsNullOrWhiteSpace(release.tag_name))
+                throw new InvalidOperationException("No current release with download files was found.");
+            if (!game.MatchesReleaseTarget(release.tag_name))
+                throw new InvalidOperationException($"The configured release '{game.ReleaseTarget}' is no longer available.");
+            return release;
+        }
+
+        private static void RejectDuplicateDownloadNames(GitHubRelease release)
+        {
+            var names = new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
+            foreach (var asset in release.assets)
+                if (!names.Add(asset.name))
+                    throw new InvalidOperationException($"Release '{release.tag_name}' contains more than one download named '{asset.name}'.");
+        }
+
+        private async Task<int> DownloadsJsonCommand(string[] args)
+        {
+            var id = GetExactArg(args, 1);
+            var platform = GameInfo.GetPlatformIdentifier(new AppSettings());
+            GitHubRelease? release = null;
+            try
+            {
+                var settings = AppSettings.Load();
+                platform = GameInfo.GetPlatformIdentifier(settings);
+                if (args.Length != 2 || string.IsNullOrWhiteSpace(id))
+                    throw new ArgumentException("Usage: QuiverLauncher --downloads-json <id from --list-json>");
+                await InitializeExactIdLibrary();
+                var game = CliLibrary.FindById(_gameManager!.LibraryApps, id);
+                release = await ResolveDownloadRelease(game, settings);
+                RejectDuplicateDownloadNames(release);
+                var gamePath = game.GetInstallPath(_gameManager.GamesFolder);
+                game.InstalledBuild = InstalledBuild.Read(gamePath);
+                game.Status = GameStatus.NotInstalled;
+                // Read installation evidence without creating/repairing version.txt.
+                var versionFile = Path.Combine(gamePath, "version.txt");
+                var windowsInstaller = WindowsInstallerService.HasReceipt(gamePath);
+                var flatpak = FlatpakService.HasReceipt(gamePath);
+                var portable = !windowsInstaller && !flatpak &&
+                    GameInstallationService.HasCompletePortableInstallation(gamePath, game.GetInstallationOptions());
+                if (windowsInstaller)
+                    WindowsInstallerService.ApplyState(game, gamePath);
+                else if (flatpak)
+                {
+                    var state = await FlatpakService.Current.GetStateAsync(gamePath, LauncherSession.OperationCancellation);
+                    game.InstalledVersion = state?.Version;
+                    if (state?.Installed == true)
+                        game.Status = GameStatus.Installed;
+                }
+                else if (File.Exists(versionFile))
+                {
+                    game.InstalledVersion = (await File.ReadAllTextAsync(versionFile)).Trim();
+                    if (portable)
+                        game.Status = GameStatus.Installed;
+                }
+                CliDownloads.PrepareSelection(game, release, settings, flatpak, portable);
+                var choices = game.DownloadChoices!;
+                var reason = choices.Eligible.Count == 0 && choices.Uncertain.Count == 0 ? choices.EmptyReason : null;
+                Console.WriteLine(CliDownloads.Serialize(game.InstanceKey, platform, release, choices, game.SelectedDownload, reason));
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine(CliDownloads.Serialize(id, platform, release, null, null, ex.Message));
+                return 1;
             }
         }
 
@@ -251,8 +347,10 @@ namespace QuiverLauncher
             PrintHelpItem("-h, --help", "Show this help screen");
             PrintHelpItem("-l, --list", "List all available games");
             PrintHelpItem("--list-json", "List library IDs, icons, versions and status as JSON");
+            PrintHelpItem("--downloads-json <id>", "Review the current release and native download choices as JSON");
             PrintHelpItem("-u, --update", "Update all installed games");
             PrintHelpItem("--update-app <id>", "Update one installed app by its exact library ID");
+            PrintHelpItem("  --release <tag> --asset <file>", "Install that exact reviewed release and file");
             PrintHelpItem("--update-launcher", "Update the launcher itself");
             PrintHelpItem("-d, --download <name>", "Download and install a game");
             PrintHelpItem("-r, --run <name>", "Run a game (auto-updates if needed)");
@@ -610,7 +708,8 @@ namespace QuiverLauncher
             }
         }
 
-        private async Task<int> UpdateOrDownloadGame(GameInfo game, bool isUpdate)
+        private async Task<int> UpdateOrDownloadGame(GameInfo game, bool isUpdate,
+            GitHubRelease? reviewedRelease = null, GitHubAsset? reviewedAsset = null)
         {
             try
             {
@@ -623,27 +722,30 @@ namespace QuiverLauncher
                 // Store initial version for comparison
                 string initialVersion = game.InstalledVersion ?? "";
 
-                // Get the latest release info
-                await game.CheckStatusAsync(_gameManager.HttpClient, _gameManager.GamesFolder, forceUpdateCheck: true);
-
-                // Catalog startup evidence can contain only a verified version, not its download files.
-                // Resolve that release before deciding whether a headless asset selection is possible.
-                if (game.GetLatestRelease() == null)
+                if (reviewedRelease == null)
                 {
-                    var release = await game.CatalogReleaseAsync(LauncherSession.OperationCancellation)
-                        ?? await CatalogReleaseSelection.FetchSelectedAsync(
-                            _gameManager.HttpClient, game.RepositorySource, game.Repository!,
-                            game.ReleaseTarget, game.GetReleaseApiToken(settings),
-                            LauncherSession.OperationCancellation);
-                    if (release != null)
-                        game.ApplyCachedRelease(release.tag_name, release);
+                    // Catalog startup evidence can contain only a verified version, not its download files.
+                    await game.CheckStatusAsync(_gameManager.HttpClient, _gameManager.GamesFolder, forceUpdateCheck: true);
+                    if (game.GetLatestRelease() == null)
+                    {
+                        var release = await game.CatalogReleaseAsync(LauncherSession.OperationCancellation)
+                            ?? await CatalogReleaseSelection.FetchSelectedAsync(
+                                _gameManager.HttpClient, game.RepositorySource, game.Repository!,
+                                game.ReleaseTarget, game.GetReleaseApiToken(settings),
+                                LauncherSession.OperationCancellation);
+                        if (release != null)
+                            game.ApplyCachedRelease(release.tag_name, release);
+                    }
+                    game.TrySelectPlatformDownload(settings);
                 }
+                else
+                    GameDownloadService.SelectExplicit(game, reviewedRelease, settings, reviewedAsset!);
 
                 string platformIdentifier = GameInfo.GetPlatformIdentifier(settings);
                 WriteColor($"→ Detected platform: {platformIdentifier}", ColorMuted);
                 Console.WriteLine();
 
-                if (game.TrySelectPlatformDownload(settings) && game.SelectedDownload != null)
+                if (game.SelectedDownload != null)
                 {
                     WriteColor($"→ Selected: {game.SelectedDownload.name}", ColorSuccess);
                     Console.WriteLine();
@@ -652,20 +754,24 @@ namespace QuiverLauncher
 
                 if (game.SelectedDownload == null)
                 {
-                    WriteColor(game.DownloadChoices?.NeedsChoice == true
+                    return PrintError(game.DownloadChoices?.NeedsChoice == true
                         ? "Download selection is required. Open Quiver to choose a file."
-                        : game.DownloadChoices?.EmptyReason ?? "No eligible download was found.", ColorError);
-                    return 1;
+                        : game.DownloadChoices?.EmptyReason ?? "No eligible download was found.");
                 }
 
                 var isFlatpakDownload = GameInstallationService.IsFlatpakAsset(game.SelectedDownload.name);
                 if (game.IsWindowsInstaller || GameInstallationService.IsWindowsInstallerAsset(game.SelectedDownload.name))
                     return PrintError("MSI installation requires the Windows desktop interface. Open Quiver and run the installer there.");
-                var expectedVersion = game.LatestVersion;
-                var downloadTask = game.PerformActionAsync(
-                    _gameManager.HttpClient,
-                    _gameManager.GamesFolder,
-                    settings, HeadlessGameDownloadDialogs.Instance);
+                var expectedVersion = reviewedRelease?.tag_name ?? game.LatestVersion;
+                var downloadTask = reviewedRelease == null
+                    ? game.PerformActionAsync(_gameManager.HttpClient, _gameManager.GamesFolder,
+                        settings, HeadlessGameDownloadDialogs.Instance)
+                    : GameDownloadInstallService.DownloadAndInstallAsync(
+                        game, _gameManager.HttpClient, _gameManager.GamesFolder, reviewedRelease,
+                        settings, GameStatus.UpdateAvailable, HeadlessGameDownloadDialogs.Instance,
+                        releaseMode: ReleaseInstallMode.ExplicitRelease,
+                        reinstall: game.InstalledVersion == reviewedRelease.tag_name &&
+                            game.InstalledBuild?.FileName != reviewedAsset!.name);
 
                 // Monitor progress and version changes
                 double lastProgress = 0;
@@ -709,9 +815,17 @@ namespace QuiverLauncher
 
                 // Verify installation
                 await downloadTask;
+                var installCompleted = game.Status == GameStatus.Installed;
+                var completedBuild = game.InstalledBuild;
                 await game.CheckStatusAsync(_gameManager.HttpClient, _gameManager.GamesFolder, forceUpdateCheck: true);
 
-                if (game.Status == GameStatus.Installed && (!isFlatpakDownload || game.InstalledVersion == expectedVersion))
+                var installedBuild = game.InstalledBuild;
+                var reviewedInstalled = reviewedRelease != null && installCompleted && game.IsInstalled &&
+                    string.Equals(game.InstalledVersion, expectedVersion, StringComparison.Ordinal) &&
+                    installedBuild != null && installedBuild == completedBuild &&
+                    string.Equals(installedBuild.FileName, reviewedAsset!.name, StringComparison.Ordinal);
+                if (reviewedRelease != null ? reviewedInstalled :
+                    game.Status == GameStatus.Installed && (!isFlatpakDownload || game.InstalledVersion == expectedVersion))
                 {
                     WriteColor($"✓ {game.Name} ", ColorSuccess);
                     Console.WriteLine($"{(isUpdate ? "updated" : "installed")} successfully ({CleanVersion(game.InstalledVersion)})");
@@ -764,11 +878,31 @@ namespace QuiverLauncher
             return await UpdateOrDownloadGame(game, isUpdate: false);
         }
 
-        private async Task<int> UpdateGameById(string id)
+        private async Task<int> UpdateGameById(string id, string? releaseTag = null, string? assetName = null)
         {
             if (_gameManager == null)
                 return PrintError("App library is not available.");
-            var game = CliLibrary.FindById(_gameManager.Games, id);
+            var game = CliLibrary.FindById(_gameManager.LibraryApps, id);
+            if (releaseTag != null)
+            {
+                var settings = AppSettings.Load();
+                var release = await ResolveDownloadRelease(game, settings);
+                if (!string.Equals(release.tag_name, releaseTag, StringComparison.Ordinal))
+                    return PrintError($"The current release for {game.Name} changed from '{releaseTag}' to '{release.tag_name}'. Review its downloads again.");
+                RejectDuplicateDownloadNames(release);
+                var choices = GameDownloadService.Prepare(game, release, settings);
+                var asset = choices.Eligible.Concat(choices.Uncertain)
+                    .SingleOrDefault(candidate => string.Equals(candidate.name, assetName, StringComparison.Ordinal));
+                if (asset == null)
+                    return PrintError($"Download '{assetName}' is no longer available for {game.Name} on {GameInfo.GetPlatformIdentifier(settings)}.");
+                if (GameInstallationService.IsWindowsInstallerAsset(asset.name))
+                    return PrintError("MSI installation requires the Windows desktop interface. Open Quiver and run the installer there.");
+                await GameStatusService.CheckStatusAsync(game, _gameManager.HttpClient, _gameManager.GamesFolder,
+                    checkRemoteVersion: false, applyCachedRelease: false);
+                if (!game.IsInstalled)
+                    return PrintError($"{game.Name} is not an installed app.");
+                return await UpdateOrDownloadGame(game, isUpdate: true, release, asset);
+            }
             if (game.Status == GameStatus.Installed)
             {
                 Console.WriteLine($"{game.Name} is already up to date ({CleanVersion(game.InstalledVersion)}).");
